@@ -1,0 +1,50 @@
+/* CookCircle — global styles + voice-state keyframes (ported from the prototype) */
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:'Hanken Grotesk',-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased;transition:background .25s}
+#root{min-height:100%}
+button{font-family:inherit}
+
+/* mic listening ring */
+@keyframes cc-pulse-ring{0%{box-shadow:0 0 0 0 var(--cc-ring,rgba(201,84,43,.35))}70%{box-shadow:0 0 0 20px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.cc-pulse{animation:cc-pulse-ring 1.4s cubic-bezier(.4,0,.2,1) infinite}
+
+/* listening dot */
+@keyframes cc-blink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+.cc-mic-dot{width:9px;height:9px;border-radius:50%;display:inline-block;animation:cc-blink 1s ease-in-out infinite}
+
+/* processing spinner */
+@keyframes cc-rot{to{transform:rotate(360deg)}}
+.cc-spin{width:14px;height:14px;border-radius:50%;border:2px solid;display:inline-block;animation:cc-rot .7s linear infinite}
+
+/* speaking bars */
+.cc-bars{display:inline-flex;align-items:flex-end;gap:2.5px;height:15px}
+.cc-bars i{width:3px;border-radius:2px;height:100%;animation:cc-eq .9s ease-in-out infinite}
+.cc-bars i:nth-child(2){animation-delay:.15s}
+.cc-bars i:nth-child(3){animation-delay:.3s}
+.cc-bars i:nth-child(4){animation-delay:.45s}
+@keyframes cc-eq{0%,100%{height:30%}50%{height:100%}}
+
+/* pop in */
+@keyframes cc-pop{0%{opacity:0;transform:scale(.9)}100%{opacity:1;transform:scale(1)}}
+.cc-pop{animation:cc-pop .28s cubic-bezier(.34,1.56,.64,1) both}
+
+/* sheet up */
+@keyframes cc-up{0%{transform:translateY(100%)}100%{transform:translateY(0)}}
+.cc-sheet{animation:cc-up .3s cubic-bezier(.32,.72,0,1) both}
+
+/* toast */
+@keyframes cc-toast-in{0%{opacity:0;transform:translateY(12px)}100%{opacity:1;transform:translateY(0)}}
+.cc-toast{animation:cc-toast-in .25s ease-out both}
+
+/* speaker rings pulse out */
+@keyframes cc-ring-pulse{
+  0%{ transform: scale(.8); opacity:.55; }
+  80%{ transform: scale(1.35); opacity:0; }
+  100%{ transform: scale(1.45); opacity:0; }
+}
+.cc-spkring{ will-change: transform, opacity; }
+
+@media (prefers-reduced-motion: reduce){
+  .cc-pulse,.cc-mic-dot,.cc-spin,.cc-bars i,.cc-pop,.cc-sheet,.cc-toast,.cc-spkring{animation:none!important}
+}
