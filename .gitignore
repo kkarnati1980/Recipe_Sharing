@@ -4,6 +4,11 @@ dist-ssr
 *.local
 .vite
 
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
 # Generated patch artifacts
 *.patch
 

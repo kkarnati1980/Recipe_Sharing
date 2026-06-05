@@ -14,6 +14,7 @@ import {
   useTweaks, TweaksPanel, TweakSection, TweakRadio,
   TweakToggle, TweakColor, TweakSelect,
 } from './components/tweaks.jsx';
+import { getCapabilities, synthesize, transcribe } from './voiceService.js';
 
 /* ── status line ── */
 function StatusLine({ vstate, T, primary, secondary, idleText }) {
@@ -577,11 +578,39 @@ function Share({ T, primary, recipe, txt, setTxt, onShare, onCopy, onAgain }) {
 /* ── overlays ── */
 /* Voice input — opens when the user taps the mic. Tries real STT (Web Speech API);
    always supports typed/chip fallback so any phrase routes through detectIntent. */
-function VoiceInputSheet({ T, primary, recipe, source, liveText, onClose, onSubmit, sttSupported, sttError }) {
+function VoiceInputSheet({ T, primary, recipe, source, liveText, onClose, onSubmit, sttSupported, sttError, sttBackend, onTranscribe }) {
   const [text, setText] = useState('');
+  const [recState, setRecState] = useState('idle'); // idle | recording | transcribing
   const inputRef = useRef(null);
+  const mediaRef = useRef(null);
+  const chunksRef = useRef([]);
+  const mountedRef = useRef(true);
+  const canRecord = sttBackend && typeof navigator !== 'undefined' && navigator.mediaDevices && window.MediaRecorder;
   useEffect(() => { inputRef.current && setTimeout(() => inputRef.current.focus(), 120); }, []);
   useEffect(() => { if (liveText) setText(liveText); }, [liveText]);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    try { if (mediaRef.current && mediaRef.current.state === 'recording') mediaRef.current.stop(); } catch (e) { /* ignore */ }
+  }, []);
+
+  async function toggleRecord() {
+    if (recState === 'recording') { try { mediaRef.current && mediaRef.current.stop(); } catch (e) { /* ignore */ } return; }
+    if (recState === 'transcribing') return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach((tr) => tr.stop());
+        const blob = new Blob(chunksRef.current, { type: mr.mimeType || 'audio/webm' });
+        if (mountedRef.current) setRecState('transcribing');
+        await onTranscribe(blob);
+        if (mountedRef.current) setRecState('idle');
+      };
+      mediaRef.current = mr; mr.start(); setRecState('recording');
+    } catch (e) { setRecState('idle'); }
+  }
 
   let chips;
   if (source === 'home') {
@@ -624,6 +653,18 @@ function VoiceInputSheet({ T, primary, recipe, source, liveText, onClose, onSubm
               ? 'Mic permission was denied — type or pick a command. Both go through the same intent pipeline.'
               : 'Mic capture isn’t available here — pick a command or type any phrase. Long phrases work too (e.g. “go back to the grinding step”).'}
           </div>
+        )}
+
+        {canRecord && (
+          <button onClick={toggleRecord} disabled={recState === 'transcribing'}
+            style={{ width: '100%', marginBottom: 14, padding: '12px', borderRadius: 13, cursor: recState === 'transcribing' ? 'default' : 'pointer', fontFamily: FONT, fontWeight: 700, fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              background: recState === 'recording' ? alpha(primary, .14) : primary,
+              color: recState === 'recording' ? primary : T.onPrimary,
+              border: recState === 'recording' ? `1.5px solid ${primary}` : 'none' }}>
+            {recState === 'recording' ? <><span className="cc-mic-dot" style={{ background: primary }} /> Stop &amp; transcribe</>
+              : recState === 'transcribing' ? <><span className="cc-spin" style={{ borderColor: alpha(T.onPrimary, .4), borderTopColor: T.onPrimary }} /> Transcribing…</>
+              : <>🎙 Record &amp; transcribe (AI)</>}
+          </button>
         )}
 
         <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: T.faint, marginBottom: 8 }}>Quick commands</div>
@@ -712,7 +753,19 @@ const TWEAK_DEFAULTS = {
   dark: false,
   sound: true,
   headFont: 'Sora',
+  language: 'en-IN',
 };
+
+const LANGUAGES = [
+  { value: 'en-IN', label: 'English' },
+  { value: 'hi-IN', label: 'Hindi' },
+  { value: 'ta-IN', label: 'Tamil' },
+  { value: 'te-IN', label: 'Telugu' },
+  { value: 'kn-IN', label: 'Kannada' },
+  { value: 'ml-IN', label: 'Malayalam' },
+  { value: 'mr-IN', label: 'Marathi' },
+  { value: 'bn-IN', label: 'Bengali' },
+];
 
 export default function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -750,10 +803,14 @@ export default function App() {
   const currentRunRef = useRef(null);
   const stepsReachedRef = useRef(0);
   const speakIntervalRef = useRef(null);
+  const audioRef = useRef(null);
   const sttRef = useRef(null);
   const sttSupported = !!(typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition));
+  // backend voice capabilities (ElevenLabs TTS / Sarvam STT+TTS), null until probed
+  const [voiceCaps, setVoiceCaps] = useState(null);
 
   useEffect(() => { ensureSeedHistory(); setHistory(readHistory()); }, []);
+  useEffect(() => { getCapabilities().then(setVoiceCaps); }, []);
 
   useEffect(() => { setPersonaId(t.persona); }, [t.persona]);
   useEffect(() => { document.documentElement.style.setProperty('--head', `'${t.headFont}',sans-serif`); }, [t.headFont]);
@@ -784,27 +841,60 @@ export default function App() {
     persistRun();
   }
 
-  function speak(text) {
+  // stop any in-flight audio (backend element or browser TTS) + progress tick
+  function stopSpeak() {
+    if (audioRef.current) { try { audioRef.current.pause(); } catch (e) { /* ignore */ } audioRef.current = null; }
+    stopSpeak();
+    if (speakIntervalRef.current) { clearInterval(speakIntervalRef.current); speakIntervalRef.current = null; }
+  }
+
+  // Speak a step: prefer backend TTS (ElevenLabs / Sarvam, multilingual), then
+  // fall back to the browser's speechSynthesis, then to a silent timer. In every
+  // path the state ends up transitioning speaking -> listening (auto-listen).
+  async function speak(text) {
     if (!t.sound) return false;
-    try {
+    stopSpeak();
+    const words = text.split(/\s+/).length;
+    const estMs = Math.max(1800, Math.min(8000, (words / 2.5) * 1000 + 800));
+    const finish1 = () => {
+      setVstate(s => s === 'speaking' ? 'listening' : s);
+      setSpeakProgress(1);
       if (speakIntervalRef.current) { clearInterval(speakIntervalRef.current); speakIntervalRef.current = null; }
-      const synth = window.speechSynthesis; if (!synth) return false;
-      synth.cancel();
+    };
+
+    // 1) backend TTS
+    const caps = voiceCaps || await getCapabilities();
+    if (caps && (caps.elevenlabs || caps.sarvam)) {
+      const url = await synthesize(text, { language: t.language });
+      if (url) {
+        const a = new Audio(url);
+        audioRef.current = a;
+        let done = false;
+        const fin = () => {
+          if (done) return; done = true;
+          try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+          if (audioRef.current === a) audioRef.current = null;
+          finish1();
+        };
+        a.onended = fin; a.onerror = fin;
+        a.ontimeupdate = () => { if (a.duration && isFinite(a.duration)) setSpeakProgress(Math.min(1, a.currentTime / a.duration)); };
+        setSpeakProgress(0);
+        try { await a.play(); } catch (e) { /* autoplay blocked — safety timer below */ }
+        after(estMs + 2000, fin);
+        return true;
+      }
+    }
+
+    // 2) browser speechSynthesis fallback
+    try {
+      const synth = window.speechSynthesis; if (!synth) throw new Error('no synth');
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = persona.rate; u.pitch = persona.pitch;
+      u.rate = persona.rate; u.pitch = persona.pitch; u.lang = t.language || 'en-US';
       let done = false;
-      const fin = () => {
-        if (done) return; done = true;
-        setVstate(s => s === 'speaking' ? 'listening' : s);
-        setSpeakProgress(1);
-        if (speakIntervalRef.current) { clearInterval(speakIntervalRef.current); speakIntervalRef.current = null; }
-      };
+      const fin = () => { if (done) return; done = true; finish1(); };
       u.onend = fin;
       synth.speak(u);
-      const words = text.split(/\s+/).length;
-      const estMs = Math.max(1800, Math.min(8000, (words / 2.5) * 1000 + 800));
       after(estMs, fin);
-      // progress tick for word highlight
       setSpeakProgress(0);
       const start = Date.now();
       speakIntervalRef.current = setInterval(() => {
@@ -813,7 +903,12 @@ export default function App() {
         if (p >= 1 || done) { clearInterval(speakIntervalRef.current); speakIntervalRef.current = null; }
       }, 90);
       return true;
-    } catch (e) { return false; }
+    } catch (e) {
+      // 3) no audio at all — still advance to listening
+      setSpeakProgress(1);
+      after(1400, () => setVstate(s => s === 'speaking' ? 'listening' : s));
+      return false;
+    }
   }
   function speakStep(i) {
     if (!recipe) return;
@@ -822,8 +917,7 @@ export default function App() {
     setLiveTranscript('');
     if (!t.sound) { setVstate('listening'); setSpeakProgress(1); return; }
     setVstate('speaking');
-    const spoke = speak(recipe.steps[i]);
-    if (!spoke) { setSpeakProgress(1); after(1400, () => setVstate(s => s === 'speaking' ? 'listening' : s)); }
+    speak(recipe.steps[i]); // handles backend/browser/silent fallbacks + transition
   }
 
   // Speak current step whenever it changes or REPEAT is requested.
@@ -853,7 +947,7 @@ export default function App() {
       currentRunRef.current = null;
     }
     const r = allRecipes[id]; if (!r) return;
-    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+    stopSpeak();
     setRecipe(r); setStep(0); setInput(''); setVstate('idle'); micFail.current = true;
     setConversation([]); stepsReachedRef.current = 0; setSpeakProgress(0); setLiveTranscript('');
     setScreen('detail');
@@ -868,7 +962,7 @@ export default function App() {
 
   function finish() {
     clearTimers();
-    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+    stopSpeak();
     setVstate('idle');
     if (currentRunRef.current) {
       currentRunRef.current.completed = true;
@@ -916,7 +1010,7 @@ export default function App() {
       // stop previous
       if (sttRef.current) { try { sttRef.current.abort(); } catch (e) { /* ignore */ } sttRef.current = null; }
       const rec = new SR();
-      rec.continuous = false; rec.interimResults = true; rec.lang = 'en-US';
+      rec.continuous = false; rec.interimResults = true; rec.lang = t.language || 'en-US';
       rec.onresult = (e) => {
         let interim = '', final = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -1062,7 +1156,14 @@ export default function App() {
               <VoiceInputSheet T={T} primary={primary} secondary={secondary} recipe={recipe}
                 source={voiceSheet.source} liveText={liveTranscript}
                 sttSupported={sttSupported} sttError={sttError}
+                sttBackend={!!(voiceCaps && voiceCaps.sarvam)}
                 onSubmit={(phrase) => processVoicePhrase(phrase, voiceSheet.source)}
+                onTranscribe={async (blob) => {
+                  const src = voiceSheet.source;
+                  const text = await transcribe(blob, { language: t.language });
+                  if (text && text.trim()) processVoicePhrase(text.trim(), src);
+                  else setToast('Couldn’t transcribe that — try again or type.');
+                }}
                 onClose={() => { stopVoiceCapture(); setVstate(s => s === 'listening' ? 'idle' : s); }} />
             )}
             <Toast T={T} msg={toast} />
@@ -1079,6 +1180,8 @@ export default function App() {
         <TweakRadio label="Default persona" value={t.persona} options={['amma', 'chef', 'friend']}
           onChange={(v) => setTweak('persona', v)} />
         <TweakToggle label="Voice readout (TTS)" value={t.sound} onChange={(v) => setTweak('sound', v)} />
+        <TweakSelect label="Voice language" value={t.language}
+          options={LANGUAGES} onChange={(v) => setTweak('language', v)} />
         <TweakSection label="Palette" />
         <TweakColor label="Primary (terracotta)" value={t.primary}
           options={['#C9542B', '#B5431F', '#D2603A', '#A8431F', '#C2410C']} onChange={(v) => setTweak('primary', v)} />

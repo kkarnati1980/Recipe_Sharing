@@ -45,36 +45,74 @@ token set. The UI is presented inside an iOS-style device frame.
 - [Vite](https://vitejs.dev/) + [React 18](https://react.dev/)
 - No CSS framework — design tokens live in `src/theme.js`; voice-state
   keyframes in `src/index.css`.
-- State + persistence via React hooks and `localStorage` (no backend).
+- App state + run history persist via React hooks and `localStorage`.
+- A tiny dependency-free Node proxy (`server/`, Node built-ins only) holds the
+  ElevenLabs / Sarvam keys and exposes `/api/tts`, `/api/stt`, `/api/health`;
+  mounted into Vite in dev and run standalone in production.
 
 ## Getting started
 
 ```bash
 npm install
-npm run dev      # start the dev server
+npm run dev      # dev server (Vite) — includes the voice API at /api/*
 npm run build    # production build → dist/
 npm run preview  # preview the production build
+npm run serve    # standalone server: serves dist/ + the voice API
+npm run start    # build, then serve
 ```
 
 Then open the printed local URL.
 
-> **Speech notes.** Spoken steps use the browser's built-in
-> `speechSynthesis`, and live speech-to-text uses the Web Speech API — both
-> are best supported in Chrome / Edge and only start after your first tap
-> (a browser autoplay rule). Where STT isn't available, the voice sheet falls
-> back to quick-command chips and free text, which feed the same intent
-> pipeline, so no functionality is lost.
+## Voice: ElevenLabs + Sarvam (optional)
+
+CookCircle can speak and listen through real cloud voices, with the browser's
+built-in speech as an automatic fallback:
+
+- **ElevenLabs** — high-quality multilingual **text-to-speech**.
+- **Sarvam** — Indian-language **text-to-speech and speech-to-text**.
+
+Keys are held **server-side** and proxied through `/api/*` (so they never reach
+the browser bundle). To enable, copy `.env.example` → `.env` and fill in:
+
+```bash
+cp .env.example .env
+# ELEVENLABS_API_KEY=...   SARVAM_API_KEY=...
+npm run dev
+```
+
+The app probes `/api/health` on load:
+
+- **Step readout (TTS):** uses Sarvam for Indian languages and ElevenLabs
+  otherwise; if neither key is set (or a request fails) it falls back to the
+  browser's `speechSynthesis`.
+- **Voice commands (STT):** the live Web Speech API path is used where the
+  browser supports it; when a Sarvam key is present, the voice sheet also offers
+  **🎙 Record & transcribe (AI)** (records via `MediaRecorder`, transcribes via
+  Sarvam). Either way the text routes through the same `detectIntent` pipeline.
+- **Voice language** is selectable in Settings (English + several Indian
+  languages) and drives both TTS and STT.
+
+> Without keys, everything still works on browser speech (best in Chrome /
+> Edge; audio only starts after your first tap, per browser autoplay rules).
+> The same keys are referenced by the registered `elevenlabs` / `sarvam` MCP
+> servers via `${ELEVENLABS_API_KEY}` / `${SARVAM_API_KEY}`.
 
 ## Project structure
 
 ```
 index.html              # Vite entry + Google Fonts
+.env.example            # voice API keys (copy to .env)
+server/
+  voiceHandlers.js     # /api/tts, /api/stt, /api/health → ElevenLabs / Sarvam
+  index.js             # standalone server: serves dist/ + the voice API
+vite.config.js          # React plugin + voice API dev/preview middleware
 src/
-  main.jsx              # React root
+  main.jsx             # React root
   index.css            # global styles + voice-state keyframes
   theme.js             # color helpers + Kitchen Daylight / Evening Hearth tokens
   data.js              # recipes, personas, detectIntent intent pipeline
   history.js           # run records + analytics computations + seed data
+  voiceService.js      # client wrapper for the voice proxy (capabilities/TTS/STT)
   App.jsx              # screens, overlays, voice + run orchestration
   components/
     iosframe.jsx       # iOS device frame
